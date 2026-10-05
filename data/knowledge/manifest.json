@@ -1,0 +1,22 @@
+{
+  "ingested_at": "2026-09-30T04:41:36.530988+00:00",
+  "index_version": 1,
+  "collection": "aerofix_manuals",
+  "embedding_provider": "huggingface",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "passages_indexed": 19707,
+  "datasets": [
+    {
+      "name": "tpattanayak/aeroground",
+      "config": "retrieval_corpus",
+      "rows": 14399,
+      "chunks": 14399
+    },
+    {
+      "name": "Remixonwin/amt-airframe-handbook-dataset",
+      "config": "default",
+      "rows": 1,
+      "chunks": 487
+    }
+  ]
+}

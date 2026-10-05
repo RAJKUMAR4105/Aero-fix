@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+</style>
+</head>
+<body>
+<script>
+(() => {
+  // Dark world map behind the Ops Center: a normal equirectangular world map
+  // (land polygons + coastline + graticule) rendered from a LOCAL Natural
+  // Earth 110m asset, glowing airport nodes, dashed great-circle routes and
+  // small aircraft that ALWAYS fly the fixed city-to-city sequence
+  //     Chennai -> Dubai -> London -> New York -> Tokyo -> Singapore -> Chennai
+  // (never random destinations). Land geometry ships inside ui/sky.html (built
+  // by scripts/build_world_map.py from ui/assets/world-land.json) - no Google
+  // Maps, no CDN, no external API. Nothing here is clickable: the canvas
+  // attaches to the page body at z-index -1 (behind every content
+  // block) and the clickable AOG board in the hero is the interactive
+  // fallback. Flight state lives on the parent window, so a Streamlit rerun,
+  // a view switch or an iframe remount never resets the planes. Motion rules:
+  //   sidebar "Reduce animations" ON -> frozen completely
+  //   OS prefers-reduced-motion      -> 30% speed, no contrails, no blinking
+  //   phase "pending" (review)       -> 40% speed, never 0
+  const config = __SKY_CONFIG__;
+  try { if (window.frameElement) window.frameElement.setAttribute('data-af-bg', 'sky'); } catch (e) {}
+
+  // --- host page ------------------------------------------------------------
+  let host = window, hostDoc = document;
+  try {
+    if (window.parent && window.parent !== window && window.parent.document) {
+      host = window.parent;
+      hostDoc = window.parent.document;
+    }
+  } catch (e) { /* same frame only */ }
+
+  const store = host.__AF_SKY__ || (host.__AF_SKY__ = {});
+  const instance = (store.instance || 0) + 1;
+  store.instance = instance;
+  const MAP_VERSION = 3;                 // route-map world (wipes older fleets)
+  store.mapVersion = MAP_VERSION;
+  try { if (window.frameElement) window.frameElement.setAttribute('data-af-instance', String(instance)); } catch (e) {}
+
+  // --- canvas: attached to the page body exactly once ------------------------
+  let canvas = hostDoc.getElementById('af-sky-canvas');
+  if (!canvas) {
+    canvas = hostDoc.createElement('canvas');
+    canvas.id = 'af-sky-canvas';
+    canvas.setAttribute('aria-hidden', 'true');
+    canvas.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;z-index:-1;' +
+      'display:block;pointer-events:none;';
+    (hostDoc.body || hostDoc.documentElement).appendChild(canvas);
+  }
+  const ctx = canvas.getContext('2d');
+
+  // --- live controls written by app.py into #af-motion -----------------------
+  const motionMarker = () => hostDoc.getElementById('af-motion');
+  const toggleOn = () => {
+    const marker = motionMarker();
+    return marker ? marker.dataset.reduce === '1' : Boolean(config.reduceMotion);
+  };
+  const reviewHold = () => {
+    const marker = motionMarker();
+    return marker ? marker.dataset.phase === 'pending' : Boolean(config.calm);
+  };
+  const osReduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const speedMul = () => {
+    if (toggleOn()) return 0;
+    const base = osReduce ? 0.3 : 1;
+    return reviewHold() ? base * 0.4 : base;
+  };
+
+  let debugOn = false;
+  try { debugOn = new URLSearchParams(host.location.search).get('debug') === '1'; } catch (e) {}
+
+  const faults = (config.faults && config.faults.length) ? config.faults : ['Fault on hold'];
+  const seedAog = config.seedAog || [];
+  const MIN_FLYING = 10;
+  const MIN_GROUNDED = 3;
+  const UNDER_PANEL = 0.35;
+  const MAP_STORE_V = 3;
+
+  // --- local world-map asset: dot-matrix land grid (scripts/build_world_dots) -
+  const LAND_DATA = '28,y0,ju,10,5,1i,1a,1y,9,w,q,a,3,a,v,u,g,12,7,25,j,6,h,d,n,j,0,8,b,j,h,0,b,1b,b,b,r,p,7,1d,3,v,a,i,i,1,e,f,2,7,u,a,a,9,4,6,e|25,92,39,o,17,u,2,8,g,e,6,w,7,a,23,y,4,2,13,15,0,0,1r,q,r,z,7,1b,2,d,a,2b,1,b,8,z,5,g,24,m,u,2,q,f,u,6,c,j,1a,o,8;5,6w,35,9,e,e,c,8,7,9,7|7,bg,na,8,p,f,j,f,e,1,12,8,a,g,9|9,so,dg,1c,1,16,14,6,n,9,0,2,f,j,v,1n,a,7,k|5,10d,un,1p,6,0,1a,g,n,1k,h;60,103,c9,c,d,8,g,o,0,14,11,1o,p,4,7,j,t,1m,5,w,12,a,r,27,1t,h,2b,q,h,3,d,e,7,1,9,h,p,t,9,1p,1,4,11,b,5,1b,1,2,j,e,5,a,8,6,b,x,h,7,t,x,b,5,d,14,h,7,h,n,b,b,n,p,f,k,v,23,6,7,q,j,6,1,m,m,m,c,1s,a,4,b,c,6,8,b,u,8,4,6,1s,c,6,5,12,e,e,c,10,d,1k,g,1m,s,w,1,1c,m,a,4,q,g,i|10,o8,mu,s,2,i,j,5,5,i,7,0,d,7,1,7,g,13,g,2,8|6,x3,18f,b,j,31,8,b,6,2g,1,q,g;6,2gf,185,11,1,1f,k,c,8,12,3,y,b;10,p3,17b,q,9,c,t,2t,f,2h,3,p,8,4,8,1o,c,1a,w,14,4;6,1vb,14t,1e,0,t,b,r,2,j,6,4,8;4,1xr,14t,w,7,1t,8,e,6;6,1iz,13x,18,1,c,9,2j,0,t,c,12,0;12,121,13f,5,n,1z,5,a,8,1p,0,0,8,m,8,10,2,8,y,a,a,i,2,w,v;111,wj,zn,1v,b,b,d,a,d,v,5,13,t,1e,n,s,t,k,1n,1z,v,3f,p,3n,1,1y,n,2b,9,1,f,1g,l,8q,15,u,f,4o,u,3w,7,14,e,6u,m,n,k,39,3,3,o,a,4,3k,s,3k,c,2s,k,10,c,6,8,l,4,m,g,1q,e,14,m,1m,7,a,g,1g,b,20,6,a,7,4e,y,10,1,q,f,1g,g,y,7,2c,a,18,3,m,b,2i,4,2q,g,12,o,2m,p,1w,o,30,i,3y,12,12,3,1a,p,1i,d,1i,c,2o,9,g,p,1,9,z,b,2,7,o,0,n,n,14,7,m,4,1m,18,22,8,u,o,22,m,28,0,o,k,y,j,3e,3,26,4,1q,w,1w,p,28,4,1w,g,14,f,2c,b,1w,g,34,5,3c,c,6,i,u,t,i,3,4g,2,m,j,18,9,22,9,10,6,2q,j,1c,j,36,3,26,h,11,13,1r,d,1d,z,1,h,o,l,12,1,8,9,2v,7,13,x,26,t,2w,h,a,9,5w,h;57,2rx,1b1,g,c,2m,7,2g,c,1o,d,4y,f,1m,6,3q,9,30,c,4,8,3z,6,1x,c,i,o,3,a,25,i,3g,3,2c,k,1p,i,37,6,1j,m,5,m,s,7,36,1,2w,i,7,g,6,6,q,4,c,5,52,o,8m,3,38,g,w,j,k,6,22,f,3w,1,a,8,n,e,n,2,n,u,2k,5,1k,d,3g,6,i,e,28,h,22,7,o,g,2a,h,42,k,10,k,r,1a,i,o,1,o,8,8,2e,1a,2w,q,c,3,7,7|5,12a,qz,y,d,5,7,v,1,4,k|8,28s,mn,k,5,12,4,7,19,5,6,d,d,h,2,p,1k;82,27s,7n,6,d,e,6,g,f,k,27,1c,r,i,11,k,1,4,l,14,z,e,1j,d,1x,1f,29,5,x,x,7,13,n,r,c,2,a,r,h,1n,g,j,12,t,a,2,o,9,d,h,3,m,y,1,e,z,13,f,8,h,12,1n,m,2v,d,11,f,9,h,23,1,11,l,r,2,v,g,0,c,e,6,2,m,f,1i,x,1w,a,7,7,i,g,d,f,12,e,1g,2,d,8,e,16,m,2c,k,q,u,2,i,e,i,8,h,a,4,7,a,6,a,a,3,2,e,q,s,s,8,q,l,o,1,3,c,o,12,14,8,0,a,f,6,1y,h,o,6,a,9,j,h,9,x,2m,1h,e,6,g,1c,3,q,c,1i,8,6,m,1h|15,9g,qq,1,7,b,0,5,j,r,5,1b,e,n,5,t,6,8,a,1o,1,0,g,e,c,e,5,k,8,w,9|3,p0,m2,m,j,p,k;16,qc,mw,o,c,10,t,f,1,d,11,h,a,8,a,5,6,v,f,0,e,h,8,6,6,h,k,u,1,7,c,c,2|7,ga,2h,5,y,c,1,6,c,c,1,6,j,j,l|5,1u,si,y,4,o,d,9,p,1r,w|9,1i,3i,f,3,3,1o,h,s,y,y,m,9,2,v,f,j,3,n|14,1j,5c,t,0,l,g,4,q,o,10,a,3,1o,10,i,3,c,13,o,5,0,d,j,f,29,1,1,b|17,1fi,c8,5,p,j,16,h,0,3,j,p,6,5,16,b,6,g,e,d,c,8,c,o,7,2,d,1e,5,n,t,a,9,8,c|13,cm,ok,4,7,1i,1,w,a,s,9,h,l,6,b,11,3,0,9,1p,0,b,k,c,i,b,g|4,171,d8,h,g,a,c,8,h;4,177,es,l,3,1,8,o,0;3,16r,es,3,d,b,m|8,ak,oy,8,0,2,p,h,j,h,8,11,10,4,8,1g,1|17,d2,ty,14,8,m,i,1,8,y,c,1i,b,1,f,12,r,r,5,a,j,h,1,5,d,2x,c,z,5,5,i,c,4,5,g|5,1dh,9w,k,a,9,13,b,7,0,m|28,yv,c7,n,0,7,f,b,e,p,6,t,l,j,1e,8,k,n,10,c,m,5,u,c,1c,f,w,o,0,y,m,q,2,1,z,m,h,24,p,6,1d,14,0,1,j,g,h,7,z,5,3,h,g,1h,3,h,1f|86,vz,gr,28,1u,0,g,9,c,9,3,6,y,l,0,7,w,15,6,5,12,e,14,f,i,2,k,13,0,5,1e,23,q,l,i,2,10,p,1,x,l,17,0,0,u,f,b,h,0,j,c,4,a,j,u,i,i,4,q,16,k,i,0,a,1s,b,w,e,2,2,8,b,2,0,c,1a,6,8,h,w,5,16,s,h,6,1,q,7,6,y,5,16,e,6,e,e,3,a,j,9,n,k,t,y,c,q,1,0,e,1q,7,w,16,g,19,a,3,2,d,f,f,6,5,10,1,0,j,g,c,1m,j,a,9,3,b,o,6,1w,9,1k,11,w,5,i,17,7,x,1z,29,b,2n,v,27,l,l,1f,7,1n,t,h,j,7,1j,2h,2t,5,c,a,a,b,e,1r,12|4,1rg,2i,q,i,3,l,b,5|6,1ey,fg,6,j,19,1,h,8,o,o,q,5|18,e8,a9,16,13,6,j,s,b,19,t,r,11,t,3,h,8,x,r,h,4,2,c,h,m,0,1o,k,0,0,1y,1a,8,8,7,y,c|20,8i,44,1i,a,g,m,18,a,e,m,o,a,e,j,1,l,w,n,1a,1f,1n,1,v,7,7,d,1l,k,j,f,0,d,r,4,l,r,t,1c,6,y|6,zd,pw,y,3,h,7,n,8,5,6,8,6;3,yb,ra,1h,g,1i,b;6,1wl,qy,17,6,1b,o,5,g,1g,9,12,n;23,v5,s6,d,h,e,8,c,5,5,5,1a,7,5,d,e,4,a,n,9,f,l,2,0,k,n,h,b,0,e,a,j,4,1n,0,a,e,7,4,10,18,u,i,a,0,3,5;7,21p,u0,k,2,5,l,g,f,7,0,t,o,1,g;4,181,yk,f,9,3,8,g,6;4,19h,yu,n,9,h,6,16,8;10,1bb,10i,4,9,2q,t,h,5,15,e,1b,j,7,a,p,1,g,a,a,y;6,165,11a,l,0,3,a,8,a,y,1,1,b;5,1h3,12e,d,5,1x,c,w,e,12,b;145,1e9,12m,1,j,s,g,o,d,5,d,i,d,10,w,2,m,1m,3,q,9,2,9,f,b,e,9,1,9,11,d,1d,4,t,z,1v,n,1,b,l,3,19,11,9,13,u,1,i,x,s,4,3a,13,1i,3,4,z,e,l,u,j,g,6,a,m,9,u,d,c,w,8,y,s,f,w,n,e,o,m,f,1c,e,6,20,3,1c,p,10,0,6,15,y,f,s,c,w,u,1s,1t,7,d,2i,x,8,f,m,9,2,n,2d,11,3j,0,2l,1v,1e,u,1y,i,i,9,h,b,c,11,q,9,y,4,k,m,2,d,c,7,n,b,2f,z,d,2,1,i,10,g,1h,3,d,c,0,s,r,6,t,11,f,9,1v,0,11,r,11,0,9,1,6,b,23,n,7,8,k,u,9,y,19,w,1x,s,1r,3,1h,c,9,e,7,7,ff,0,1f,s,z,8,b,i,2,c,n,a,3,g,n,e,a,w,x,e,x,10,15,s,13,h,t,m,13,6,0,58,2i,f,16,e,u,1,1q,e,e,7,k,e,1a,j,s,e,2,f,1k,8,3i,h,q,9,r,9,10,3,20,6,k,b,m,a,j,8,c,8,14,2,12,f,1k,7,1q,4,3,c,i,4,w,7,0,h,c,g,g,0,a,k,19,k,2,m,o,e,q,1,1c,v,h,9;28,1rf,14m,9,7,1a,6,q,9,o,a,y,p,a,8,d,k,12,0,m,7,i,x,1y,j,1,7,v,1,c,7,5,5,1z,8,41,d,b,a,17,4,n,g,2q,8,31,2,9,8,1a,8,1t,6,u,m,1i,c;4,1m1,14s,h,b,t,e,w,2;5,16d,14m,1x,5,l,a,2,8,1i,0;47,1c3,14o,g,d,i,g,1g,a,y,l,1,b,1m,c,20,h,2,9,12,6,2e,t,i,h,z,9,26,h,u,h,u,0,5,d,x,n,1j,s,p,1,1,b,1k,p,c,j,5,d,23,k,1g,z,2n,k,n,a,6,6,1l,k,1l,9,h,8,e,e,26,4,5,6,w,u,3,8,27,o,e,4,1j,m,19,9,4j,m,k,8,r,0,5,k,g,i,20,e;11,1jr,150,1o,0,6,5,j,9,w,7,3,h,1f,5,1r,m,0,6,16,1,l,e;7,1fr,14g,l,f,l,2,b,q,u,e,28,3,t,h;9,1ux,13o,1f,9,1j,k,14,10,j,c,1w,2,26,3,16,d,2r,x;5,1fz,15o,b,7,1f,6,12,e,i,5;8,1ip,16m,g,7,9,p,1h,2,0,a,v,0,1,e,28,6;13,1o3,16c,8,7,12,4,4,9,b,9,43,b,3,6,16,a,39,0,1a,q,3i,j,r,i,14,6;14,1gl,16u,1q,5,i,7,5,5,10,9,3k,4,1i,9,6,7,15,9,3h,0,2b,8,9,m,2b,i,8,8;7,1sj,174,1,d,f,7,1j,7,1n,0,24,s,u,0;3,1g3,172,1f,6,1i,3;4,1p7,176,11,5,r,6,20,6;3,1ox,17o,1j,3,u,8;4,1h7,17e,19,0,9,g,1o,9;7,1jl,17i,8,7,31,a,k,6,n,4,1,8,2m,9;13,1cb,18a,o,7,1r,j,z,1,15,2,l,a,i,c,11,0,x,g,1c,g,7,4,1a,2,2k,j;30,121,1a6,2o,3,10,9,37,h,18,0,35,x,35,9,s,1,d,3,g,9,2f,p,12,7,1h,b,31,2,1v,4,1,a,10,4,9,e,1u,7,1n,i,1m,i,z,k,2u,4,37,0,27,s,3e,g,1a,7,g,c,1q,4,4s,2|10,5c,qe,1,7,i,3,0,7,1p,d,f,c,9,1,0,8,e,g,10,6|10,123,t7,0,19,w,0,l,d,l,2,1p,k,1b,y,20,p,g,o,k,8;54,11v,bx,8,r,g,1,5,j,l,9,2,1b,r,v,f,1l,e,1j,b,z,d,d,6,11,b,5,5,1r,7,3,c,t,5,7,c,b,9,3,b,1r,l,l,2,l,k,5,8,p,1u,5,17,b,3,h,7,1,1x,w,7,e,6,c,9,c,1,y,8,k,m,g,t,6,i,g,6,y,o,7,a,16,d,6,5,p,b,4,m,26,7,16,8,2,10,2m,1,1y,c,q,g,3g,5,1q,g,e,o,z,7,j|7,1pa,ae,f,9,f,6,1,i,18,e,4,7,7,7;127,1yy,ro,y,7,o,d,8,h,28,e,n,1b,d,j,15,1,2,15,9,0,0,9,b,c,7,b,t,7,2,9,p,6,1f,11,1r,j,m,u,b,a,29,17,18,t,m,e,w,7,2,b,r,3,11,z,k,9,y,1h,0,f,b,3,g,h,7,v,b,1,1b,1z,1j,x,x,b,7,6,1n,l,7,l,9,0,0,m,1l,8,7,8,2,c,r,c,1z,l,2,l,9,0,1,c,f,3,n,a,6,g,b,4,3,k,l,3,2,o,k,g,0,w,f,g,x,2,8,8,9,e,d,9,f,6,15,r,1d,8,n,j,1,g,1l,2,1x,12,n,2,1b,q,3,m,e,1,0,a,5,q,l,o,v,8,n,u,1,k,j,2,1,s,y,e,k,3,8,e,1s,k,2,g,e,6,h,y,1e,c,e,10,14,5,a,a,2,k,w,e,8,2,m,n,s,7,e,f,7,n,6,7,2g,l,k,t,2i,0,2c,l,30,q,s,g,9,g,c,c,w,5,26,12,1a,0,2,6,x,m,1b,7,3,8,o,10,o,7,s,c,s,12,0,a,9,6,g,a,2a,1,g,7,s,15|17,1l,2s,x,4,1p,f,2,q,j,g,6,10,a,6,9,o,8,a,y,4,2,7,e,6,m,f,u,0,4,r,b,11,8,h|21,7a,1a,1x,0,4,g,p,y,e,w,i,c,k,7,c,8,12,24,g,g,2,q,k,1l,p,0,3,9,k,d,8,l,h,t,0,t,u,1b,1,b,v,a|39,h4,1y,0,n,8,1,p,v,h,1v,8,1p,q,1b,x,1,b,f,0,1f,o,7,2,l,f,2,x,w,b,5,19,i,15,1,9,24,v,8,d,5,7,f,t,1,n,18,27,3,6,m,k,a,k,9,s,u,8,10,o,q,i,2k,k,g,1m,j,8,e,w,8,1o,2,c,f,y,4,6,7|24,78,2n,7,8,d,b,f,k,g,c,7,c,k,8,2,a,s,b,6,a,0,s,9,c,a,o,j,2,3,k,1k,b,o,14,s,3,h,25,n,p,7,z,r,t,9,a,f,7|40,15v,3,h,c,l,0,v,q,12,16,7,6,4,y,9,12,c,4,3,g,y,e,4,o,c,a,u,2,w,o,e,5,z,v,7,p,a,1,g,15,12,0,e,h,16,0,9,v,a,n,9,9,i,t,b,e,19,5,0,b,c,1,1,7,d,1,c,v,9,1r,f,c,e,k,f,8,19,0,13,18|10,1a3,4k,13,12,1,9,b,6,3,k,6,6,12,5,o,p,7,1,0,l|12,19p,cw,28,d,28,1b,1x,3,e,a,j,6,b,i,1p,c,7,4,8,4,1r,d,1e,o|4,i6,ji,12,c,b,b,l,0|4,iw,ji,t,7,3,8,w,0|10,9g,r0,x,8,j,7,z,i,5,g,16,g,1c,h,i,4,q,h,z,d|21,5i,uk,k,j,w,a,12,p,5,3,i,11,1j,f,6,f,m,b,d,b,0,f,2z,2,c,s,11,a,3,1c,g,6,2,q,o,0,e,a,5,k,g,3|9,ny,72,4,d,b,5,8,3,5,b,j,4,1,a,e,i,8,0|5,72,uw,b,f,l,c,1,8,u,6;8,62,ve,p,j,6,9,r,0,7,u,8,c,16,c,3,l|8,13t,ay,y,1,y,j,7,7,13,4,d,f,9,k,6,c|23,6o,d2,3h,25,1d,9,1,c,6j,4a,0,s,1y,o,u,i,2,e,1a,e,h,1m,k,a,1i,i,3u,6,5,17,b,b,2,f,u,n,e,1h,1,1l,7,7,k,x,q,5|18,18l,1v,a,e,3,a,7,9,b,a,2,m,g,12,o,c,u,j,m,0,i,b,1,r,l,j,n,7,f,t,b,9,n,c,4,c|13,je,ge,j,11,v,18,1w,39,3,f,s,l,6l,0,5,4g,a,w,22,d,16,e,k,d,1a,6|11,nk,6y,1b,14,t,0,b,a,5,f,n,4,a,1g,u,k,i,15,24,1r,5,3|23,4z,na,7,m,s,e,3e,5,18,f,1i,1,0,b,17,h,d,h,7,f,8,b,f,l,r,h,19,0,t,d,v,s,a,e,9,u,8,2,4,s,a,6,5,a,13,4|10,di,w4,2,c,j,4,1,c,q,6,1y,3,d,b,6,h,7,5,15,a|24,l2,8c,c,9,u,0,w,j,g,j,d,h,2,9,k,3,3,5,m,r,2a,n,1j,1n,p,0,z,l,l,8,n,h,1v,k,t,18,x,o,g,c,a,18,w,14,a,10,o,3|24,fw,12e,3,d,w,d,h,f,m,l,d,h,i,d,7,b,u,d,1v,1b,2v,d,v,i,4,k,7,i,q,o,1o,q,z,q,1,u,1l,o,c,6,1y,f,u,o,u,8,q,7|5,2r4,9l,4,h,n,0,6,g,8,1;5,2ro,9b,d,3,1,8,s,a,0,9|4,xz,sr,1g,e,g,9,1l,d|4,5c,ng,7,f,d,i,i,e;31,20,s0,2i,r,b,r,f,1,d,f,0,7,a,2,6,7,6,d,7,5,6,d,a,3,1,7,h,b,11,6,t,5,1,b,n,3,1t,e,7,8,a,c,4,14,z,w,t,8,1,e,1o,1,5,o,i,9,1a,g,6,g,u,1|17,66,27,19,1m,e,16,10,2,0,o,a,0,q,0,4,j,k,1,9,n,a,b,0,r,5,9,r,c,1,9,j,7,8,b|5,35,uc,9,d,r,4,0,k,i,2;29,1n,wk,l,j,16,2,l,x,k,1,k,p,e,1,i,v,o,3,b,h,6,9,f,9,1z,1,17,d,b,4,1c,o,11,c,m,6,b,a,4,e,u,1,4,c,d,c,n,4,3,k,b,9,9,u,m,10,g,0|9,n4,n2,1,m,r,k,30,l,i,b,2,f,p,6,v,5,j,a|8,m,3a,1p,n,h,6,5,q,c,12,5,1k,1m,0,g,2l|18,4n,4a,f,7,b,o,d,3,b,y,p,3,f,h,11,16,s,g,0,g,18,3,0,5,q,5,m,a,m,15,5,7,a,n,9,h|5,9b,7c,2,8,w,6,q,7,15,7|5,8d,64,v,s,1o,4,0,f,j,5|5,5a,k,2,q,y,0,0,n,t,0|4,d6,ju,1g,7,1,5,1h,6;20,es,n4,9,f,1b,1,e,b,9,1,l,a,c,p,7,3,k,f,0,9,h,4,6,9,b,1,8,h,t,8,t,1k,g,o,1y,g,w,5,0,a|81,pz,19w,4k,i,6e,0,3i,f,5v,d,4q,2,g,7,l,9,44,e,1o,3,c,7,4b,l,1a,1,13,p,0,n,o,b,1r,7,12,9,4,h,l,0,q,h,17,1,o,7,7,5,1j,3,q,d,0,7,1d,2,1i,f,6,f,x,3,13,i,6,b,n,b,2a,1,2z,v,29,7,1b,r,33,n,h,d,9,p,v,f,8,f,j,z,r,1,t,i,13,0,1t,1i,d,w,r,i,8,e,d,8,k,o,u,6,c,o,1f,b,n,6,6,o,1o,3,1f,i,z,4,m,i,1f,16,p,8,0,8,1h,c,3z,0,1l,i,2k,8,3l,c,2,8,46,k,8,8,1h,6,38,o,9,a,32,8,2c,5,1g,a,3a,d,1b,a|13,1e1,7m,v,8,9,8,0,g,a,g,o,0,j,o,a,0,0,a,12,0,1,11,k,3,11,z|9,t7,1e,f,7,l,4,a,q,9,q,a,i,m,7,o,n,9,j|13,x7,4o,1i,1b,h,11,u,17,13,b,l,a,7,k,a,o,9,k,r,k,4,e,i,6,5,g|11,1ch,78,b,i,t,a,4,e,q,g,1m,2,12,j,z,3,h,j,j,0,3,f|16,ag,pi,c,d,7,5,1n,6,3,7,1i,19,1d,k,l,w,b,2,5,7,5,6,0,8,w,0,a,e,g,6,12,d|8,14n,b2,u,3,0,x,1j,6,2,8,16,0,9,g,b,2|10,90,q2,2,g,c,0,2,8,i,5,1m,g,12,d,x,v,1d,9,15,k|4,1v2,5n,x,c,i,4,i,b;5,1x4,5l,h,1,a,i,k,8,2,9;4,1ti,4h,o,b,1b,5,i,c;6,1wa,4h,1,9,t,5,r,2,0,8,16,1;10,1oc,3r,12,1,6,8,2q,11,l,7,4h,s,3,a,h,0,e,k,1c,9;5,22u,3f,9,d,1,g,8,e,4,5;4,1yo,1x,j,1,3,8,k,2;5,20i,1p,6,f,1l,a,4,c,q,0;19,22i,n,6,v,m,b,12,y,20,h,0,3l,h,g,1d,1,m,m,f,12,2b,12,d,b,3,g,f,a,y,c,t,0,x,q,12,a,w,7;27,1xk,s,f,j,d,3,1x,0,3,d,i,h,1c,g,0,9,9,4,p,j,y,1v,b,5,7,6,a,g,n,1,2,8,d,c,2,k,d,5,2,1f,j,2,2,12,d,e,o,1w,i,e,1s,7,k,e;8,1zi,m,1,f,9,2,0,p,d,12,a,o,2,b,c,1;24,1ti,10,m,h,n,1,5,v,h,d,9,1d,1,6,l,7,7,c,n,8,n,7,7,a,t,2,1,q,j,m,0,10,c,e,g,n,1c,e,y,1,q,1m,14,3,b,h,e,h;16,1ms,39,l,0,15,y,1t,2g,d,w,1t,22,18,5,1q,1p,m,0,g,d,q,p,7,f,k,7,a,n,o,f,3,n|75,178,jq,m,n,6,p,0,9,d,2,4,l,1c,p,j,r,1s,r,2o,j,0,u,c,4,2,j,i,7,1a,2,5,k,1m,u,g,5,e,a,a,d,7,7,m,1,2,7,5,f,d,4,p,d,j,1h,f,4,1,z,9,5,b,w,7,b,9,a,o,u,1d,6,1,e,n,8,7,b,e,b,f,d,c,5,4,1d,11,3,0,f,9,9,r,d,1l,1d,0,7,11,d,7,31,j,h,6,5,h,5,f,h,h,i,1p,3y,h,30,15,9,p,o,8,8,5,6,l,i,c,e,18,0,f,16,d,8,m,m,o,1,1g,1q,0,e,i,c,f,a,f,u,a,8,1i,0|10,3f,ty,4,d,f,h,z,b,r,2,g,m,9,k,16,o,0,j,c,0|38,ty,ko,1i,i,2i,v,b,1j,a,3,9,9,8,t,g,1,2,d,h,h,10,t,c,t,r,b,7,l,29,c,7,q,19,9,n,6,13,m,r,18,n,4,5,7,b,c,d,14,n,a,d,k,e,y,d,6,n,14,1,s,e,6,q,j,14,i,6,5,7,9,o,n,w,d,1o,2|19,p8,k0,e,5,2,b,f,l,e,j,o,9,a,f,1,d,i,l,p,4,d,j,11,2,1j,14,1h,k,7,o,18,k,6,14,u,k,14,3|14,81,10y,3,d,m,d,p,d,23,h,29,a,k,8,17,a,10,a,15,4,c,e,w,2,u,d,2g,g|8,ju,i6,d,f,8,f,9,v,b,y,g,12,e,4,1,b|5,8m,l8,7,v,1h,k,4,a,18,0;6,54,mw,c,d,1,p,p,0,3,10,a,1;30,6w,q0,s,5,2,h,v,3,6,p,1e,15,g,0,0,9,1g,p,3,7,r,c,9,b,g,7,1,9,j,h,7,1,8,m,d,k,2b,1c,j,u,p,a,t,d,2,8,9,4,3,y,18,0,4,8,o,2,0,8,10,4|5,173,aa,s,b,j,3,l,a,a,6|10,jq,i0,4,6,m,7,14,m,8,n,17,d,k,j,11,p,n,6,c,1a|7,22s,iy,7,h,7,6,f,f,b,6,0,a,u,i;23,26c,km,d,13,1p,9,r,l,d,6,0,g,29,d,k,f,d,v,b,9,9,8,4,i,j,k,1s,16,1q,2,k,10,e,9,14,s,i,1o,m,4,a,r,0,f,h,j;14,27y,ok,e,3,e,8,4,l,r,5,h,j,v,e,9,l,l,0,3,k,a,e,m,2,c,18,m,l|72,13g,ni,1h,v,5,8,p,2,3,g,9,0,2,k,n,e,1l,3,1x,16,1f,b,2,21,11,k,v,9,0,k,n,6,j,u,k,1,0,e,y,2,0,w,z,2,1f,7,2,a,b,c,f,0,f,e,a,g,3,4,e,m,m,b,2,e,16,m,u,0,1w,l,m,8,1k,9,y,6,6,a,v,e,y,k,d,e,8,6,24,8,26,k,10,3,6,l,1a,1,1,9,1y,k,7,5,q,f,18,1d,c,a,q,b,u,6,16,r,q,2,c,b,v,d,1,j,9,9,13,6,d,z,1d,b,i,x,d,5,2,b,n,c,2p,8,d,f,19,4|17,ms,h,c,f,p,h,l,15,r,k,1,c,23,16,0,m,m,10,j,1a,q,q,i,l,12,f,u,3,o,i,m,7,h,l|16,13g,ni,g,a,y,5,e,g,2q,7,k,f,1r,j,7,d,x,0,l,j,2b,2,2,c,18,0,q,g,1h,c,i,e|11,1li,5w,n,1k,e,g,q,4,y,9,a,e,i,7,2,11,x,d,8,b,11,9|9,1za,lg,o,z,0,n,7,9,1f,d,7,1a,g,4,d,g,14,e|5,bk,ne,d,a,e,e,k,b,7,9|6,qo,go,8,r,d,1,3,a,h,2,e,k|21,1mg,7y,8,q,v,1g,11,1,j,b,4,14,d,0,9,i,m,k,c,3,1,m,a,4,k,x,o,0,8,h,h,b,o,b,18,1j,2,x,h,8,9,d|7,jw,ii,d,3,8,g,a,e,8,0,4,7,9,7|9,49,2g,p,8,1b,14,w,y,c,n,g,8,3,n,k,f,0,9|25,8a,cq,f,7,1t,16,9,3,j,y,8,8,4,1e,7,q,a,4,0,i,s,k,2,e,22,f,a,h,1w,l,k,e,5,g,m,i,14,1,1a,j,9,v,6,5j,n,0,0,7,4d,24|7,19g,46,b,p,h,3,7,g,3,s,8,w,o,n|6,g4,g3,6,5,9,f,l,9,d,e,u,q|9,cm,u6,2,c,t,6,3,g,24,8,w,f,2,7,15,p,p,6|12,bq,v4,a,s,i,8,g,f,g,0,4,g,i,4,1g,f,8,j,x,b,v,g,1h,1|22,2v,jw,c,9,1c,1,i,1l,19,d,1,d,t,h,1x,n,1,x,1f,3,l,15,r,l,h,17,17,1,1g,2q,10,y,i,2,16,10,3,q,a,s,1c,u,k,y|7,es,qs,16,1,o,r,j,5,d,h,1,q,n,q|18,ri,6x,k,1h,5,f,5,c,3,5,2,n,1h,4f,x,d,r,c,d,1m,m,14,7,1i,8,o,12,8,s,o,4,i,8,1,i,10|55,1hx,ee,b,v,0,1b,10,1p,u,d,20,o,a,y,10,a,y,3,j,1n,d,4,5,b,17,1,0,9,9,0,k,n,n,0,9,v,x,s,f,6,11,9,3t,1g,t,k,d,m,8,k,d,s,1t,1k,0,g,l,g,3,e,v,m,h,18,x,c,2,v,1q,1x,i,1b,a,0,g,l,b,7,17,12,1,q,1j,y,a,0,8,i,p,k,v,1m,1c,4,22,r,2i,a,1g,1d,g,5,c,g,u,7,14,1n,u,b|5,bg,na,10,8,c,j,13,9,9,e|22,6r,84,a,g,3g,2,j,5a,w,0,4g,2x,2,b,m,2,0,19,d,p,2l,b,13,t,h,0,n,z,3,p,d,5,1,8,z,5,l,16,l,9,p,6,b,12|37,1ja,b8,n,9,h,p,u,17,d,l,i,p,a,11,j,13,1,1s,p,24,z,n,n,6,2,18,b,u,p,k,1,g,8,3,0,e,a,6,2,10,g,3,k,1i,q,e,e,3,4,o,c,0,g,f,0,v,j,f,1,n,m,4,4,j,c,3,5,f,o,9,g,4,l,r|6,b0,nm,7,b,j,c,g,k,m,b,3,5|34,1cs,re,2g,u,2u,l,i,e,7,c,m,k,1s,d,4,f,s,7,1s,4,w,j,18,3,22,m,1a,5,n,z,4,7,1c,8,y,l,1,5,19,0,25,11,v,6,b,b,a,f,r,f,2z,p,2b,m,2h,0,j,u,2f,m,5,8,8,o,d,g,19,i|28,j8,6d,1m,1,1k,q,a,2f,p,13,15,h,1f,17,1,d,i,v,1,13,1d,p,7,5,4,j,d,0,3,1a,d,16,u,14,2,20,1d,g,1,m,1o,g,q,b,1,v,c,b,g,i,1,q,l,k,5,q|17,6r,84,1b,14,11,9,4,28,f,i,6,6,26,0,0,14,k,2,1,1e,1u,0,0,u,24,1b,v,0,k,59,3f,1,1,b|12,j8,6d,0,15,m,j,2,p,f,h,b,c,2,w,z,i,g,1s,d,q,i,3,c,f|10,1k6,3g,2,9,o,8,k,n,2,15,e,n,d,7,15,w,n,1e,2,q;18,1tw,2i,1h,3,p,1l,x,2,1b,d,d,a,1,e,u,1,4,g,w,8,o,s,a,9,c,6,4,m,o,u,1e,t,1,7,d,0|21,92,fv,l,u,h,2s,1d,28,1,g,10,6,c,7,2c,2,e,9,1c,1,1g,c,m,5,t,d,7,8,19,7,0,1x,j,0,0,3p,r,9,l,4,b,e|6,2k4,bp,q,l,7,3,11,q,f,k,u,d|28,18,6m,0,e,n,6,b,14,1s,e,e,q,0,1a,4a,2e,16,j,g,8,4,v,g,h,d,23,n,h,9,p,a,j,c,1,7,f,l,m,f,b,p,8,13,b,n,a,j,3,r,g,p,7,9,z,l,a|20,4q,2o,1f,9,v,14,v,0,0,18,k,w,0,1e,e,m,k,4,s,f,k,4,o,9,14,c,q,7,g,c,u,t,1l,2t,b,7,j,8,p,t|9,1bl,66,13,10,k,8,1,a,k,0,i,k,10,4,b,29,11,6|8,3e,tq,k,7,9,n,b,0,4,l,n,e,x,3,s,10|37,fo,13k,1q,d,p,5,m,b,1d,9,8,e,p,8,t,7,t,n,1x,g,n,5,1,d,11,4,5,b,h,0,1r,1r,6,7,5,7,j,2,d,j,2,p,c,9,5,n,p,n,b,c,13,n,r,3,p,a,7,m,5,1a,i,c,2k,12,2e,1u,2g,14,24,8,u,g,12,0;7,dq,17a,17,9,z,6,e,4,b,8,16,4,8,7;10,a6,18a,1s,d,1d,7,11,z,n,0,15,c,i,6,1x,o,f,g,3o,8;6,e4,18o,14,5,t,b,37,2,1h,e,32,8|8,1cy,fi,0,t,2n,k,1r,s,8,i,k,e,1i,v,1k,f|13,2o4,mp,4,7,g,8,4,7,t,15,8,9,v,5,h,x,p,d,1f,8,6,m,1y,16,1a,1e;18,2p0,k3,e,j,2,e,c,l,g,5,y,4,9,t,f,2,n,17,f,7,9,8,a,g,5,c,l,8,g,e,2,s,15,1m,y,f|17,wq,bq,l,h,1,p,l,5,5,d,b,0,h,h,x,5,l,1a,1o,k,e,14,9,m,g,k,1,g,1k,p,m,l,9,l|35,15s,km,k,n,w,7,h,f,1h,0,9,7,g,t,g,9,h,b,0,d,1f,1p,n,2,l,l,e,7,g,15,17,0,b,d,f,4,j,u,2p,5,8,m,s,c,b,u,z,u,w,9,24,c,c,s,1c,c,0,c,k,i,7,c,k,0,e,o,5,i,1u,i|16,179,40,9,i,4,4,h,e,p,d,8,f,7,3,p,g,n,0,0,s,u,d,10,g,m,3,m,d,4,f,b,3|31,12n,9r,f,d,33,22,23,44,r,m,2,16,g,c,1,j,o,b,s,14,o,8,m,k,8,u,14,17,1a,0,g,7,d,j,g,b,h,0,15,j,3,p,h,h,k,t,3,9,12,b,g,c,0,t,k,0,g,v,b,1b,6,t|17,1y8,4o,2,n,5,h,7,k,7,9,0,n,n,c,0,o,b,8,t,h,3,6,8,g,o,e,6,9,y,g,1,g,i,j;7,1ww,5q,j,p,b,e,a,o,c,0,3,b,g,i;6,1tu,56,p,h,a,e,10,1a,4,f,d,b;4,1vq,6m,o,5,l,n,0,k;10,1xq,6s,6,n,f,6,6,h,9,5,9,s,c,1,0,8,b,g,i,1;4,1vi,7a,3,h,j,q,i,1;18,1ve,aa,i,0,6,r,f,n,0,v,1a,9,2,p,n,m,3,7,d,c,r,2,8,c,5,6,1,7,9,c,3,s,8,7,8,1e|4,2em,3r,d,6,d,s,u,r;12,2cg,31,19,f,r,c,2,6,s,1,6,a,2,9,c,0,g,e,1,c,g,1,0,b;15,29s,43,1y,1r,1j,a,11,14,p,a,r,b,2,f,f,5,v,4,0,3m,20,p,s,v,w,b,6,9,h,1;6,2d2,2h,5,5,7,k,x,m,g,1,u,n|16,8c,se,h,12,0,g,e,6,1k,g,34,d,c,t,b,3,g,z,t,n,6,9,n,a,1h,1,p,k,h,3,n,c|5,10t,aa,e,5,3,3,r,1,2,c|15,20k,nk,h,f,0,d,17,l,1,b,g,f,1l,d,b,8,e,q,l,a,1g,12,q,5,1,a,u,8,8,c|15,4z,na,e,8,6,9,q,2,6,9,9,5,3,r,7,1,a,t,9,j,r,3,2,s,d,8,e,16,3,e|14,yt,cb,i,1g,1i,4,i,9,6,17,16,5,8,v,m,0,9,1f,x,h,15,8,k,u,3,8,1n,q|5,s8,ds,1,e,c,c,6,h,9,b|15,cm,qm,2c,4,o,p,2,p,s,3,f,7,3,n,r,a,v,9,1h,2,3,g,l,4,r,q,g,4,m,s|15,27s,s6,m,x,t,6,b,r,i,l,0,d,f,c,b,d,2,2s,b,i,2,s,i,a,7,8,a,4,a,1f;4,cm,u6,1n,2,w,g,s,b;18,2p7,110,e,5,5,g,1i,3,14,h,1f,b,1,h,7,3,1n,c,3,a,17,0,9,6,4,8,n,3,a,9,b,7,0,28,2u,z;3,2s0,13c,p,6,q,8;4,2r9,13e,p,1,2,g,18,9;4,27s,14o,21,4,18,a,s,7;5,2bq,15q,1h,5,11,8,6,6,10,3;6,28m,160,f,f,2x,3,13,e,a,c,28,4;19,vy,13a,23,2,5,8,z,6,1,a,k,4,1,c,14,g,h,2,1c,i,5,a,34,o,3w,c,e,7,d,5,3n,h,1p,j,1p,11,4,h;271,1ng,16s,4,9,26,4,1o,h,3,9,2h,l,20,3,a,d,16,a,48,f,2,e,22,1,w,b,a,b,b,7,1k,n,k,k,w,7,3c,2,f,i,s,8,50,b,1y,r,3c,2,g,7,1,f,o,5,3u,4,10,h,o,6,f,e,a,8,4i,d,s,7,0,27,1f,7,14,v,3,d,z,4,21,f,1v,z,r,e,1f,f,9,8,h,9,r,4,t,x,2,7,m,3,1,r,j,1,7,f,8,7,x,b,7,l,t,3,5,l,r,h,r,2g,a,s,i,k,w,6,2y,1o,g,u,n,1,b,h,1f,l,f,q,1f,7,1d,v,g,d,21,5,0,e,t,4,p,9,3h,3,3x,2d,w,1,u,f,c,a,m,1,s,l,n,2l,2v,2r,r,b,n,a,t,l,3,e,a,0,4,o,5,i,16,2,12,1w,27,d,7,i,n,e,x,8,z,1o,f,8,29,2,f,9,a,5,0,9,r,11,r,b,1x,e,21,l,17,4,v,k,1r,3,r,8,3,g,1r,e,l,j,8,b,h,d,2t,m,2n,v,b,c,p,1,15,s,t,5,p,c,b,9,17,1e,p,g,8,6,1x,j,2,a,19,2,5,m,z,4,25,j,23,7,7,5,e,d,x,j,w,d,5,9,x,5,1j,a,l,7,1v,m,t,0,15,l,1,d,l,c,j,15,g,d,g,0,c,b,1,9,a,3,1b,z,12,1j,f,b,19,q,31,i,1t,10,u,k,9,8,s,8,h,2,2,8,s,8,8,y,2l,k,7,c,f,2,4,a,b,a,13,3,9,k,s,6,11,s,2,g,1h,c,h,q,8,6,5,i,y,q,j,a,1w,1c,t,e,8,c,h,e,e,i,l,m,i,g,v,e,4,e,1y,g,2g,f,2k,v,0,d,1h,f,2v,c,w,d,2,t,16,b,2,a,b,a,e,6,1c,b,g,6,b,e,1a,k,10,7,c,e,f,c,a,c,d,c,1i,7,c,9,n,1,0,b,e,5,w,4,4,c,34,s,g,1,j,b,2y,e,m,b,o,c,l,c,c,6,1m,5,2s,r,e,a,l,g,n,2,8,8,b,m,1s,14,1i,3,4,b,j,f,k,j,3,r,m,b,1b,15,m,1,1i,w,b,a,8,e,l,2,3,a,g,k,p,g,10,e,3,e,k,9,7,j,m,1,9,e,y,8,16,0,10,9,h,g,1,k,3i,6,f,c,o,c,3c,i,1y,1,2a,a,o,i,1c,8,y,5,r,5;4,1me,17i,35,7,1i,s,1u,b;6,se,18q,1x,9,l,4,c,8,19,0,3q,2;5,1ji,17u,2p,2,23,q,2m,k,2e,t|7,gw,l,8,n,h,0,5,b,b,2,6,o,a,4|14,4v,f2,2,n,1t,0,2,1d,j,1,0,13,25,0,5,5,2,8,18,2,i,18,s,m,m,16,14,4|27,ns,92,11,1s,z,10,b,1c,j,c,1b,24,9,0,8,q,m,3,12,q,j,k,18,e,o,5,2e,1h,22,b,8,h,s,j,0,l,o,j,c,v,1s,5,a,d,d,13,39,r,15,x,1z,e,3,h|27,iw,5a,f,o,0,u,9,0,b,3,6,h,j,p,r,a,j,h,17,2,j,i,d,1,b,r,b,5,r,22,b,6,m,1q,i,1,1,2g,o,0,0,14,6m,0,c,1v,i,b,t,j,b,1v,19,27|24,iw,5a,3,l,f,b,m,b,o,x,11,x,1f,5,l,m,x,3,1l,1w,n,g,c,6,c,s,e,2,k,h,18,1,k,i,s,9,k,q,5,i,c,4,a,0,0,t,c,n|11,99,7k,h,m,u,10,k,2,y,b,o,r,e,17,2v,0,1,g,1o,6,z,2|5,2i2,5t,6,5,d,0,7,c,c,3;4,2he,5h,p,6,2,8,k,7;3,2gu,4l,x,i,s,b|7,6b,3s,t,k,5,m,g,i,q,4,i,v,j,p|5,1cr,7g,d,3,v,a,e,e,y,b|9,r6,5a,l,t,h,0,1r,o,l,s,a,i,k,l,2o,k,0,r|14,rm,6g,s,8,1,r,1b,2x,13,1b,1x,1f,t,13,b,g,0,22,m,s,1m,g,26,2i,0,12,8,0|15,bm,p8,o,h,c,2,5,b,c,f,9,d,h,5,4,a,j,c,9,9,l,e,8,a,f,12,s,4,c,7|11,vp,3c,1q,3,9,h,a,p,9,p,t,4,0,d,9,2,t,18,2,e,c,6|7,ai,ri,22,7,d,f,l,6,1l,f,j,e,y,k|7,7o,pu,1c,8,8,7,f,5,9,d,v,0,0,a|28,cc,10i,j,d,4,b,1z,x,d,r,y,n,h,l,l,5,h,1f,n,2,b,f,n,0,11,1y,q,o,6,o,b,a,1,q,e,k,k,1,6,8,5,8,1s,1s,i,0,6,c,12,3,2,e,1y,n,8,11;4,as,w8,l,l,3,c,q,a|6,hu,et,f,b,b,c,6,k,g,1,4,9|11,lk,ik,13,l,l,8,i,u,b,8,1,g,g,s,1k,1,1k,a,j,f,5,13|27,82,76,2,8,b,2,9,k,a,q,o,i,e,24,f,i,3,w,k,a,4e,23,2,27,h,2,l,1p,8,0,c,t,n,9,d,l,17,9,f,l,1h,9,5,s,j,e,4,a,q,0,b,i,0,q|9,12,3e,f,3,9,k,2,s,d,1c,i,6,1,9,i,r,1,19|29,1l0,6s,z,8,4,g,h,0,h,1v,q,1f,w,n,5,7,b,1,1,a,j,6,11,12,s,1y,9,12,h,q,e,m,t,18,i,q,10,e,a,h,e,0,3,13,16,g,g,1,e,f,g,1h,5,7,17,1,d,f|21,13g,mc,r,1,1,b,2c,1,4,h,k,1,2,j,x,2,t,f,9,w,9,4,v,p,r,1,c,m,3,e,f,4,6,a,g,1,g,o,s,6,1,f|32,y0,ju,1,g,23,u,z,0,v,f,0,10,f,6,6,e,d,0,4,i,10,2,j,m,f,3,1,f,5,e,8,6,o,4,s,j,w,0,3,a,y,k,s,b,a,j,s,1,a,j,10,n,1a,h,0,b,f,6,j,b,3,f,19,j|3,1xg,4x,1a,a,17,d|5,y9,60,g,2,0,f,h,1,2,8|15,5a,gu,7,10,t,o,g,20,m,8,e,1,0,9,i,4,9,9,4,v,d,9,s,n,1,d,r,j,0,h|29,ki,my,1y,5,18,c,k,9,2,f,m,b,d,5,e,17,13,4,1t,d,1j,2,b,j,5,a,8,8,t,2,d,b,t,1,f,a,13,9,15,c,p,u,a,g,b,a,m,i,u,2,8,e,12,1,1c,i,y,0;8,f4,mm,f,9,5,c,a,g,9,4,12,4,k,d,r,5|5,1vo,dk,l,1b,b,w,s,y,a,5|19,iu,j,24,15,2,b,s,j,9,n,e,h,3,x,m,z,23,r,11,4,h,16,1n,m,l,10,5,14,u,m,5,k,6,e,7,c,u,2|11,hq,j,19,5,6,12,q,w,7,2,0,o,1g,6,c,8,k,19,l,z,0,l|36,ho,sy,14,4,c,9,3,9,g,1,8,b,2m,j,7,x,2l,v,0,b,u,3,3,7,1b,d,b,4,4,8,j,6,m,c,11,8,0,8,j,1,l,p,r,4,e,i,m,0,p,y,n,8,1f,f,17,4,b,a,e,c,5,a,s,i,7,o,10,6,2y,b,6,e|10,vz,gr,c,2,1s,11,c,d,9,9,6,b,t,n,1l,a,b,c,a,1m|5,2ed,am,7,0,0,o,m,f,7,5;76,1gn,rg,a,d,1i,b,1s,4,2e,z,u,n,a,x,j,t,8,7,24,o,5,c,a,2,12,0,12,s,1w,0,g,a,u,12,s,5,0,r,g,h,1p,l,d,r,g,d,21,d,10,0,15,1,h,11,b,c,8,l,f,n,4,e,d,q,2,l,d,2,e,5,c,19,1v,15,17,15,0,r,o,1p,b,z,j,g,n,14,6,e,l,q,r,5,p,g,1r,3,4,j,23,c,t,5,1b,x,0,11,l,4,f,6,13,1o,t,8,b,f,f,6,1f,1e,2h,9,21,s,1b,3,r,u,15,c,11,1s,n,o,d,q,1,1e,c,1i,d,1m,u,7,a,h,3,12,fc,0,0,8;5,2cz,vq,j,7,d,g,u,a,m,7;3,2jz,xa,11,6,10,2;4,2nd,zg,1o,9,f,5,19,8;60,2e5,13i,g,7,7e,j,0,57,14,5,u,l,14,i,16,r,y,z,y,d,0,b,9,9,t,e,5,i,n,g,b,i,1d,2,3b,12,r,1,1p,i,l,3,4,d,21,f,6,u,m,6,5,6,1v,11,e,9,h,f,15,d,15,r,3j,v,3y,1s,e,q,15,9,p,e,v,7,2,i,b,8,p,3,t,e,1,c,d,8,u,w,u,0,1a,e,d,c,e,8,2b,7,r,6,x,k,20,i,g,0,1,9,16,0,2t,1a,c,a,1o,a,q,i,2y,m|35,10y,ks,0,c,19,i,z,o,9,k,r,2,9,k,r,c,x,j,4,9,l,0,1,22,1g,c,1y,15,1m,4,o,d,1,j,a,0,4,f,q,1,6,7,1i,w,b,f,1i,b,p,f,n,2,2,g,r,5,f,n,f,2,5,9,g,3,4,d,b,l,d,6|41,13l,6k,b,7,4,19,e,g,7,m,o,8,6,g,y,v,14,0,q,9,c,a,1c,2,f,5,6,9,g,0,g,9,2,f,i,3,f,b,6,f,h,5,3,d,g,l,1d,l,x,6,8,5,2,p,i,5,15,r,f,1,t,16,a,a,9,o,a,w,15,0,d,i,11,0,7,8,0,k,h,g,q,1c|23,1o2,c0,r,h,j,v,1s,23,6,1z,27,1p,7,c,6,e,f,c,12,a,7,c,y,e,2,1m,1d,1y,n,c,i,c,7,i,n,0,j,y,1q,i,s,b,1,b,8,7|4,2ku,89,4,f,9,0,3,m|4,jq,i0,1,h,9,1,6,m|13,ti,9a,d,5,3,f,1x,v,1p,d,b,b,t,1,h,1g,g,1c,20,d,16,y,1m,8,g,x|30,hi,g9,r,z,1f,15,x,d,1r,0,1n,h,n,e,9,u,6,i,11,1q,a,a,c,d,m,3,s,a,0,22,k,13,e,2,y,s,i,7,u,4,s,12,1a,u,10,3,e,15,1,r,f,2,5,j,c,b,u,c,b,15;5,g4,g3,h,2,l,j,e,d,w,q|23,i8,53,e,p,f,1r,a,5,1n,f,2,d,r,9,11,11,19,a,t,1,p,s,0,1s,16,0,1,14,12,h,s,4,y,v,g,1,1,m,n,8,6,1u,w,6,12,d|13,hc,cd,1r,g,5,k,t,o,h,w,y,3,1e,1a,g,2,0,7,14,9,a,5,0,p,b,1p';
+  const DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz';
+  function base36(text) {
+    let value = 0;
+    for (let i = 0; i < text.length; i++) value = value * 36 + DIGITS.indexOf(text[i]);
+    return value;
+  }
+  function unzigzag(value) { return (value >>> 1) ^ -(value & 1); }
+  const landFeatures = (() => {
+    const feats = [];
+    if (!LAND_DATA) return feats;
+    LAND_DATA.split('|').forEach(feature => {
+      const rings = [];
+      feature.split(';').forEach(chunk => {
+        const cells = chunk.split(',');
+        const n = +cells[0];
+        if (!(n >= 3)) return;
+        let x = 0, y = 0;
+        const pts = new Array(n);
+        for (let i = 0; i < n; i++) {
+          x += unzigzag(base36(cells[1 + i * 2]));
+          y += unzigzag(base36(cells[2 + i * 2]));
+          pts[i] = [x / 10, y / 10];        // lon, lat (0.1 deg precision)
+        }
+        rings.push(pts);
+      });
+      if (rings.length) feats.push(rings);
+    });
+    return feats;
+  })();
+  const landRings = [].concat.apply([], landFeatures);
+
+  // --- fixed route table: real airports, real coordinates, ordered sequence ---
+  const AIRPORTS = [
+    { code: 'VOMM', city: 'Chennai',   lon: 80.17,  lat: 13.10 },
+    { code: 'OMDB', city: 'Dubai',     lon: 55.36,  lat: 25.25 },
+    { code: 'EGLL', city: 'London',    lon: -0.45,  lat: 51.47 },
+    { code: 'KJFK', city: 'New York',  lon: -73.78, lat: 40.64 },
+    { code: 'RJTT', city: 'Tokyo',     lon: 139.78, lat: 35.55 },
+    { code: 'WSSS', city: 'Singapore', lon: 103.99, lat: 1.36 }
+  ];
+  // Chennai -> Dubai -> London -> New York -> Tokyo -> Singapore -> Chennai
+  const ROUTES = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0]];
+  const ROUTE_NAME = ROUTES.map(pair => `${AIRPORTS[pair[0]].city} - ${AIRPORTS[pair[1]].city}`);
+
+  const jet = new Path2D('M0 -18 L4 -4 L17 3 L17 6 L4 4 L3 17 L-3 17 L-4 4 L-17 6 L-17 3 L-4 -4 L0 -18 Z');
+  const cargo = new Path2D('M0 -20 L5 -5 L20 3 L20 7 L5 5 L4 18 L-4 18 L-5 5 L-20 7 L-20 3 L-5 -5 L0 -20 Z');
+
+  // Spec palette for the normal world map (dim behind the Streamlit content).
+  const OCEAN = '#1E2A32', LAND = '#2F3E48', COAST = 'rgba(255,255,255,0.08)';
+
+  // --- map projection: equirectangular, whole world in view ------------------
+  const VIEW = { lon0: -180, lat1: 84, lonW: 360, latH: 144 };
+  let width = 0, height = 0, dpr = 1, planes = [],
+      nextAog = Date.now() + 20000 + Math.random() * 20000,
+      nextFaultIndex = seedAog.length % faults.length;
+  let scale = 1, mapX = 0, mapY = 0, worldW = 1, planeScale = 1;
+  let routes = [], mapLayer = null, panels = [], redraw = true;
+
+  function fitMap() {
+    const contain = Math.min(width / VIEW.lonW, height / VIEW.latH);
+    let fit = contain;
+    if (fit * VIEW.latH < 130) fit = Math.min(height / VIEW.latH, width / 226);
+    if (fit * VIEW.latH > height) fit = height / VIEW.latH;
+    scale = fit;
+    worldW = 360 * scale;
+    mapX = Math.round((width - VIEW.lonW * scale) / 2);
+    mapY = Math.round((height - VIEW.latH * scale) / 2);
+    planeScale = Math.max(0.5, Math.min(1, (VIEW.latH * scale) / 300));
+  }
+  function pxX(lon) { return mapX + (lon - VIEW.lon0) * scale; }        // unwrapped
+  function pxY(lat) { return mapY + (VIEW.lat1 - lat) * scale; }
+  /** Wrap a screen x back into the canonical [-180,180) world strip. */
+  function wrapX(x) {
+    const anchor = mapX + (-180 - VIEW.lon0) * scale;
+    return anchor + (((x - anchor) % worldW) + worldW) % worldW;
+  }
+
+  // --- great-circle route geometry (proper city-to-city paths) ---------------
+  function toVec(lon, lat) {
+    const a = lat * Math.PI / 180, o = lon * Math.PI / 180;
+    return [Math.cos(a) * Math.cos(o), Math.cos(a) * Math.sin(o), Math.sin(a)];
+  }
+  function buildRoute(index) {
+    const pair = ROUTES[index];
+    const from = AIRPORTS[pair[0]], to = AIRPORTS[pair[1]];
+    const a = toVec(from.lon, from.lat), b = toVec(to.lon, to.lat);
+    const dot = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+    const omega = Math.acos(dot);
+    const samples = 48, pts = [];
+    let prevLon = from.lon;
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      let lon, lat;
+      if (omega < 1e-6) {
+        lon = from.lon; lat = from.lat;
+      } else {
+        const s1 = Math.sin((1 - t) * omega), s2 = Math.sin(t * omega), den = Math.sin(omega);
+        const v = [
+          (s1 * a[0] + s2 * b[0]) / den,
+          (s1 * a[1] + s2 * b[1]) / den,
+          (s1 * a[2] + s2 * b[2]) / den
+        ];
+        lat = Math.asin(Math.max(-1, Math.min(1, v[2]))) * 180 / Math.PI;
+        lon = Math.atan2(v[1], v[0]) * 180 / Math.PI;
+      }
+      if (i > 0) {                                   // unwrap across the date line
+        while (lon - prevLon > 180) lon -= 360;
+        while (lon - prevLon < -180) lon += 360;
+      }
+      prevLon = lon;
+      pts.push({ ux: pxX(lon), uy: pxY(lat), wx: wrapX(pxX(lon)), cum: 0 });
+    }
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      total += Math.hypot(pts[i].ux - pts[i - 1].ux, pts[i].uy - pts[i - 1].uy);
+      pts[i].cum = total;
+    }
+    return { index, from, to, pts, len: Math.max(1, total) };
+  }
+  function routePoint(route, phase) {
+    const target = Math.max(0, Math.min(1, phase)) * route.len;
+    let i = 1;
+    while (i < route.pts.length - 1 && route.pts[i].cum < target) i++;
+    const a = route.pts[i - 1], b = route.pts[i];
+    const span = Math.max(1e-6, b.cum - a.cum);
+    const t = Math.max(0, Math.min(1, (target - a.cum) / span));
+    return {
+      x: wrapX(a.ux + (b.ux - a.ux) * t),
+      y: a.uy + (b.uy - a.uy) * t
+    };
+  }
+
+  function resize() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    width = host.innerWidth || innerWidth;
+    height = host.innerHeight || innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fitMap();
+    routes = ROUTES.map((_, index) => buildRoute(index));
+    buildMapLayer();
+    planes.forEach(p => { if (p.mode === 'flight') routeLen(p); });
+    redraw = true;
+  }
+
+  function xyAirport(airport) { return { x: pxX(airport.lon), y: pxY(airport.lat) }; }
+  function nearest(point) {
+    return AIRPORTS.reduce(
+      (best, a) => {
+        const at = xyAirport(a), cur = xyAirport(best);
+        return Math.hypot(at.x - point.x, at.y - point.y) < Math.hypot(cur.x - point.x, cur.y - point.y) ? a : best;
+      },
+      AIRPORTS[0]
+    );
+  }
+  function routeLen(p) { p.len = routes[p.routeIdx].len; }
+  function flightPos(p) {
+    if (p.mode === 'grounded') return xyAirport(p.parked);
+    if (p.mode === 'landing') {
+      return { x: p.from.x + (p.to.x - p.from.x) * p.land, y: p.from.y + (p.to.y - p.from.y) * p.land };
+    }
+    return routePoint(routes[p.routeIdx], p.phase);
+  }
+  /** Unique registration: a tail can never be both airborne and on the AOG
+      board (seedAog reserves those three, the rest are already in the air). */
+  function tail() {
+    const taken = new Set(seedAog.map(a => a.tail));
+    planes.forEach(p => taken.add(p.tail));
+    let code = '';
+    for (let tries = 0; tries < 200; tries++) {
+      code = `${Math.random() > .5 ? 'VT' : 'N'}-AF${Math.floor(10 + Math.random() * 89)}`;
+      if (!taken.has(code)) return code;
+    }
+    return `${Math.random() > .5 ? 'VT' : 'N'}-AF${Math.floor(100 + Math.random() * 899)}`;
+  }
+  /** Route with the fewest aircraft keeps departures evenly distributed. */
+  function quietestRoute() {
+    const load = ROUTES.map(() => 0);
+    planes.forEach(p => { if (p.mode !== 'grounded') load[p.routeIdx] = (load[p.routeIdx] || 0) + 1; });
+    let best = 0;
+    for (let i = 1; i < load.length; i++) if (load[i] < load[best]) best = i;
+    return best;
+  }
+  function launch(routeIdx, phase) {
+    if (planes.length >= 25) planes.shift();
+    const route = routes[routeIdx] || routes[0];
+    const plane = {
+      routeIdx: route.index, phase: phase || 0, cargo: Math.random() < .34, tail: tail(),
+      mode: 'flight', trail: [], light: Math.random() * 1000,
+      cruise: (route.len || 400) / (34 + Math.random() * 26), angle: null, last: null,
+      groundedAt: 0, fault: null, parked: AIRPORTS[0]
+    };
+    routeLen(plane);
+    planes.push(plane);
+  }
+  /** After a repair the aircraft resumes the sequence from the airport it is at. */
+  function relaunch(plane) {
+    const idx = AIRPORTS.indexOf(plane.parked);
+    const routeIdx = ROUTES.findIndex(pair => pair[0] === (idx >= 0 ? idx : 0));
+    plane.routeIdx = routeIdx >= 0 ? routeIdx : 0;
+    plane.phase = 0;
+    plane.trail = [];
+    plane.mode = 'flight';
+    plane.groundedAt = 0;
+    plane.fault = null;
+    plane.angle = null;
+    plane.last = null;
+    plane.cruise = (routes[plane.routeIdx].len || 400) / (34 + Math.random() * 26);
+    routeLen(plane);
+  }
+  function seed() {
+    for (let i = 0; i < 12; i++) {
+      const spread = (i % 6) / 6 + (i > 5 ? 0.5 : 0);
+      launch(i % ROUTES.length, Math.min(0.94, spread + Math.random() * .03));
+    }
+    seedAog.forEach((entry, i) => {
+      const at = AIRPORTS[i % AIRPORTS.length];
+      planes.push({
+        routeIdx: 0, phase: 0, cargo: false, tail: entry.tail, fault: entry.fault,
+        mode: 'grounded', parked: at, trail: [], light: Math.random() * 1000,
+        cruise: 0, angle: null, last: null, groundedAt: 0
+      });
+    });
+  }
+  function restore() {
+    if (store.mapVersion !== MAP_STORE_V) return false;
+    if (!Array.isArray(store.planes) || store.planes.length < 1) return false;
+    planes = store.planes;
+    nextAog = store.nextAog || (Date.now() + 20000 + Math.random() * 20000);
+    nextFaultIndex = typeof store.nextFaultIndex === 'number' ? store.nextFaultIndex : nextFaultIndex;
+    planes.forEach(p => { p.trail = []; p.last = null; if (p.mode === 'flight') routeLen(p); });
+    return true;
+  }
+  function persist() {
+    store.mapVersion = MAP_STORE_V;
+    store.planes = planes;
+    store.nextAog = nextAog;
+    store.nextFaultIndex = nextFaultIndex;
+  }
+
+  function triggerAog() {
+    const flying = planes.filter(p => p.mode === 'flight');
+    if (flying.length <= 6) return;
+    const candidate = flying[Math.floor(Math.random() * flying.length)];
+    const from = flightPos(candidate), destination = nearest(from);
+    candidate.mode = 'landing';
+    candidate.from = from;
+    candidate.to = xyAirport(destination);
+    candidate.parked = destination;
+    candidate.land = 0;
+    candidate.fault = faults[nextFaultIndex];
+    nextFaultIndex = (nextFaultIndex + 1) % faults.length;
+  }
+  /** Repairs landed aircraft so the AOG board never empties out. */
+  function repair(now) {
+    const grounded = planes.filter(p => p.mode === 'grounded');
+    if (grounded.length <= MIN_GROUNDED) return;
+    const due = grounded.find(p => p.groundedAt && now > p.groundedAt);
+    if (due) relaunch(due);
+  }
+  function maintain() {
+    const flying = planes.filter(p => p.mode === 'flight').length;
+    if (flying >= MIN_FLYING || planes.length >= 25) return;
+    launch(quietestRoute(), Math.random() * .08);
+  }
+
+  // --- content panels: planes dim to 0.35 while they pass behind one ---------
+  const PANEL_SELECTORS = [
+    '.hero', '.hero-copy', '.fleet-panel', '.stepper', '.signoff-panel',
+    '.review-card', '.source-card', '.audit-card', '.kb-card', '.page-footer',
+    '.section-head', '.col-head', '.col-label', '.brand-lockup', '.header-pills',
+    '[data-testid="stForm"]', '[data-testid="stSidebar"]',
+    '[data-testid="stMarkdownContainer"]', '[data-testid="stButton"]'
+  ];
+  function refreshPanels() {
+    const found = [];
+    PANEL_SELECTORS.forEach(selector => {
+      hostDoc.querySelectorAll(selector).forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 1 && rect.height > 1) found.push(rect);
+      });
+    });
+    panels = found;
+  }
+  function underPanel(x, y) {
+    for (let i = 0; i < panels.length; i++) {
+      const rect = panels[i];
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return true;
+    }
+    return false;
+  }
+
+  // --- static map layer: rendered ONCE per resize into an offscreen canvas ---
+  // Ocean, grid, land polygons, coastlines and the graticule never change
+  // between resizes, so they are not repainted per frame - only the routes,
+  // airports and aircraft are drawn live over the blitted layer.
+  function buildMapLayer() {
+    mapLayer = hostDoc.createElement('canvas');
+    mapLayer.width = Math.round(width * dpr);
+    mapLayer.height = Math.round(height * dpr);
+    const m = mapLayer.getContext('2d');
+    m.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const top = mapY, bottom = mapY + VIEW.latH * scale;
+
+    m.fillStyle = OCEAN;                                  // ocean
+    m.fillRect(0, 0, width, height);
+
+    m.save();                                             // subtle square grid
+    m.strokeStyle = 'rgba(124,181,196,.06)'; m.lineWidth = 1;
+    for (let x = 0; x < width; x += 80) { m.beginPath(); m.moveTo(x, 0); m.lineTo(x, height); m.stroke(); }
+    for (let y = 0; y < height; y += 58) { m.beginPath(); m.moveTo(0, y); m.lineTo(width, y); m.stroke(); }
+    m.restore();
+
+    m.save();                                             // land + coastlines
+    m.lineWidth = 1;
+    m.strokeStyle = COAST;
+    landFeatures.forEach(rings => {                      // one path per country
+      m.fillStyle = LAND;
+      m.beginPath();
+      rings.forEach(ring => {
+        for (let i = 0; i < ring.length; i++) {
+          const x = pxX(ring[i][0]), y = pxY(ring[i][1]);
+          if (i === 0) m.moveTo(x, y); else m.lineTo(x, y);
+        }
+        m.closePath();
+      });
+      m.fill('evenodd');                                 // holes stay open
+      m.stroke();
+    });
+    m.restore();
+
+    m.save();                                             // faint lat/lon graticule
+    m.strokeStyle = 'rgba(124,181,196,.10)';
+    m.lineWidth = 1;
+    m.setLineDash([2, 6]);
+    for (let lon = -180; lon <= 180; lon += 30) {
+      const x = pxX(lon);
+      if (x < 0 || x > width) continue;
+      m.beginPath(); m.moveTo(x, top); m.lineTo(x, bottom); m.stroke();
+    }
+    for (let lat = -60; lat <= 80; lat += 20) {
+      const y = pxY(lat);
+      if (y < top || y > bottom) continue;
+      m.beginPath(); m.moveTo(0, y); m.lineTo(width, y); m.stroke();
+    }
+    m.setLineDash([]);
+    m.strokeStyle = 'rgba(111,210,239,.14)';
+    m.beginPath(); m.moveTo(0, top); m.lineTo(width, top); m.stroke();
+    m.beginPath(); m.moveTo(0, bottom); m.lineTo(width, bottom); m.stroke();
+    m.restore();
+  }
+  function drawRoutes(now, mul) {
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(111,210,239,.34)';
+    ctx.setLineDash([5, 7]);
+    if (!osReduce && mul > 0) ctx.lineDashOffset = -(now * .012) % 1000;
+    routes.forEach(route => {
+      let open = false;
+      ctx.beginPath();
+      for (let i = 0; i < route.pts.length; i++) {
+        const pt = route.pts[i];
+        if (i > 0 && Math.abs(pt.wx - route.pts[i - 1].wx) > worldW / 2) open = false;
+        if (!open) { ctx.moveTo(pt.wx, pt.uy); open = true; }
+        else ctx.lineTo(pt.wx, pt.uy);
+      }
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+  function drawAirports() {
+    ctx.save();
+    AIRPORTS.forEach(airport => {
+      const p = xyAirport(airport);
+      const x = wrapX(p.x);
+      const glow = ctx.createRadialGradient(x, p.y, 0, x, p.y, 14);
+      glow.addColorStop(0, 'rgba(111,210,239,.45)');
+      glow.addColorStop(1, 'rgba(111,210,239,0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(x, p.y, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(111,210,239,.5)'; ctx.fillStyle = '#6fd2ef';
+      ctx.beginPath(); ctx.arc(x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, p.y, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.font = `${Math.max(9, Math.round(10 * planeScale))}px Inter,system-ui`;
+      ctx.fillStyle = 'rgba(220,244,247,.78)';
+      ctx.fillText(`${airport.code} ${airport.city}`, x + 11, p.y - 8);
+    });
+    ctx.restore();
+  }
+  function drawTrail(p) {
+    if (p.trail.length < 2) return;
+    ctx.save();
+    ctx.lineWidth = p.cargo ? 2 : 1;
+    for (let i = 1; i < p.trail.length; i++) {
+      if (Math.abs(p.trail[i].x - p.trail[i - 1].x) > worldW / 2) continue;
+      const alpha = i / p.trail.length * .3;
+      ctx.strokeStyle = p.mode === 'grounded' ? `rgba(224,160,48,${alpha})` : `rgba(152,224,239,${alpha})`;
+      ctx.beginPath(); ctx.moveTo(p.trail[i - 1].x, p.trail[i - 1].y);
+      ctx.lineTo(p.trail[i].x, p.trail[i].y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function drawPlane(p, now, dt) {
+    const at = flightPos(p), prev = p.last || at;
+    const moved = Math.hypot(at.x - prev.x, at.y - prev.y);
+    if (moved > .05 && p.mode !== 'grounded') {
+      const target = Math.atan2(at.y - prev.y, at.x - prev.x) + Math.PI / 2;
+      if (typeof p.angle !== 'number') p.angle = target;
+      else {
+        let delta = target - p.angle;
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        p.angle += delta * Math.min(1, dt * 6);
+      }
+    } else if (typeof p.angle !== 'number') {
+      p.angle = 0;
+    }
+    const aog = p.mode === 'grounded' || p.mode === 'landing';
+    ctx.save();
+    ctx.translate(at.x, at.y);
+    ctx.rotate(p.angle);
+    const size = p.cargo ? 1.08 * planeScale : .88 * planeScale;
+    ctx.scale(size, size);
+    ctx.fillStyle = aog ? '#E0A030' : '#d9f4fa';
+    ctx.shadowColor = aog ? 'rgba(224,160,48,.7)' : 'rgba(111,210,239,.4)';
+    ctx.shadowBlur = aog ? 13 : 7;
+    ctx.fill(p.cargo ? cargo : jet);
+    ctx.shadowBlur = 0;
+    if (p.cargo) {
+      ctx.fillStyle = '#2A343C'; ctx.fillRect(-3, -1, 6, 5);
+      ctx.strokeStyle = '#6fd2ef'; ctx.strokeRect(-3, -1, 6, 5);
+    }
+    if (!osReduce && Math.floor((now + p.light) / 420) % 2 === 0) {
+      ctx.fillStyle = '#D9534F'; ctx.beginPath(); ctx.arc(-15, 4, 1.6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#3FA37A'; ctx.beginPath(); ctx.arc(15, 4, 1.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    p.last = at;
+  }
+  function drawDebug(fps, mul) {
+    const air = planes.filter(p => p.mode !== 'grounded').length;
+    const lines = [
+      `FPS ${fps.toFixed(1)}   planes ${planes.length} (air ${air} / aog ${planes.length - air})`,
+      `speed x${mul.toFixed(2)}${toggleOn() ? '  FROZEN (toggle)' : ''}${osReduce ? '  30% (reduced motion)' : ''}${reviewHold() ? '  40% (review)' : ''}`,
+      `map ${width}x${height}  scale ${scale.toFixed(2)}  land rings ${landRings.length}`,
+      ...planes.slice(0, 6).map(p => {
+        const at = flightPos(p);
+        return `${p.tail}  ${Math.round(at.x)},${Math.round(at.y)}  ${p.mode}  ${ROUTE_NAME[p.routeIdx] || ''}`;
+      })
+    ];
+    ctx.save();
+    ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const boxW = 330, boxH = 18 + lines.length * 14;
+    // The canvas sits behind the sidebar, so anchor the readout to the main
+    // content column instead of the raw viewport corner.
+    let x = 16;
+    const main = hostDoc.querySelector('[data-testid="stMainBlockContainer"]')
+      || hostDoc.querySelector('[data-testid="stMain"]');
+    if (main) {
+      const rect = main.getBoundingClientRect();
+      if (rect.width > 200) x = Math.max(16, Math.round(rect.left) + 16);
+    }
+    const y = Math.max(16, height - boxH - 16);
+    ctx.fillStyle = 'rgba(6,14,18,.86)';
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = 'rgba(143, 240, 201, .5)';
+    ctx.strokeRect(x + .5, y + .5, boxW - 1, boxH - 1);
+    ctx.fillStyle = '#8FF0C9';
+    lines.forEach((text, index) => ctx.fillText(text, x + 10, y + 20 + index * 14));
+    ctx.restore();
+  }
+
+  function draw(dt, mul, fps) {
+    if (mapLayer) ctx.drawImage(mapLayer, 0, 0, width, height);   // static world map
+    const now = performance.now();
+    drawRoutes(now, mul);
+    drawAirports();
+    planes.forEach(p => {
+      const at = flightPos(p);
+      ctx.globalAlpha = underPanel(at.x, at.y) ? UNDER_PANEL : 1;
+      if (!osReduce) drawTrail(p);
+      drawPlane(p, now, dt);
+    });
+    ctx.globalAlpha = 1;
+    if (osReduce) planes.forEach(p => { p.trail.length = 0; });
+    if (debugOn) drawDebug(fps, mul);
+  }
+
+  function update(dt, mul) {
+    const now = Date.now();
+    if (now > nextAog) { triggerAog(); nextAog = now + 20000 + Math.random() * 20000; }
+    planes.forEach(p => {
+      if (p.mode === 'flight') {
+        p.phase += (p.cruise * dt * mul) / (p.len || 400);
+        if (p.phase >= 1) {
+          p.routeIdx = (p.routeIdx + 1) % ROUTES.length;   // next leg of the sequence
+          p.phase = 0;
+          p.trail = [];
+          routeLen(p);
+          p.cruise = (p.len || 400) / (34 + Math.random() * 26);
+        }
+      } else if (p.mode === 'landing') {
+        const span = Math.max(1, Math.hypot(p.to.x - p.from.x, p.to.y - p.from.y));
+        p.land = Math.min(1, p.land + (p.cruise * dt * mul) / span);
+        if (p.land >= 1) {
+          p.mode = 'grounded';
+          p.trail = [];
+          p.groundedAt = now + 45000 + Math.random() * 45000;
+        }
+      }
+      if (p.mode !== 'grounded' && !osReduce) {
+        p.trail.push(flightPos(p));
+        if (p.trail.length > 20) p.trail.shift();
+      }
+    });
+    repair(now);
+  }
+
+  function syncFleet() {
+    try {
+      const air = planes.filter(p => p.mode !== 'grounded').length;
+      const write = (id, value) => {
+        const el = hostDoc.getElementById(id);
+        if (el && el.textContent !== value) el.textContent = value;
+      };
+      write('fleet-air', String(air));
+      write('fleet-aog', String(planes.length - air));
+      write('fleet-next', faults[nextFaultIndex] || faults[0]);
+      if (speedMul() > 0) maintain();
+      persist();
+    } catch (e) { /* panel not on screen; keeps its defaults */ }
+  }
+
+  // --- animation loop: parent rAF, delta time, one instance only -------------
+  let raf = 0, last = 0, frames = 0, fps = 60, fpsAt = 0, lastMul = -1;
+  function tick(now) {
+    raf = 0;
+    if (store.token !== instance) return;          // a newer frame took over
+    let dt = (now - last) / 1000;
+    last = now;
+    if (!(dt > 0)) dt = 1 / 60;
+    dt = Math.min(.05, dt);
+    const mul = speedMul();
+    if (mul !== lastMul) { lastMul = mul; redraw = true; }
+    if (mul > 0) { update(dt, mul); redraw = true; }
+    frames += 1;
+    if (now - fpsAt >= 500) {
+      fps = frames * 1000 / Math.max(1, now - fpsAt);
+      frames = 0; fpsAt = now;
+      if (debugOn) redraw = true;
+    }
+    if (now - panelAt > 250) { refreshPanels(); panelAt = now; }
+    if (redraw) { draw(dt, mul, fps); redraw = false; }
+    store.beat = Date.now();               // heartbeat uses wall-clock time
+    raf = host.requestAnimationFrame(tick);
+  }
+  function start() {
+    if (store.token === instance && raf) return;
+    store.token = instance;
+    if (raf) { try { host.cancelAnimationFrame(raf); } catch (e) {} raf = 0; }
+    last = host.performance && host.performance.now ? host.performance.now() : Date.now();
+    fpsAt = last; frames = 0; redraw = true;
+    raf = host.requestAnimationFrame(tick);
+  }
+
+  // One-shot hooks for tests and the ?debug=1 overlay.
+  window.__afInstance = instance;
+  window.__afStarted = Date.now();
+  window.__afPositions = () => planes.map(p => {
+    const at = flightPos(p);
+    return { tail: p.tail, mode: p.mode, x: Math.round(at.x), y: Math.round(at.y) };
+  });
+  window.__afDebug = () => ({
+    fps: Math.round(fps * 10) / 10, instance, planes: planes.length,
+    air: planes.filter(p => p.mode !== 'grounded').length,
+    mul: speedMul(), frozen: toggleOn(), reducedMotion: osReduce,
+    review: reviewHold(), debugOverlay: debugOn, canvasInBody: !!hostDoc.getElementById('af-sky-canvas')
+  });
+  window.__afRoutes = () => ({
+    order: ROUTE_NAME.slice(), rings: landRings.length,
+    dots: landRings.length, scale: Math.round(scale * 100) / 100
+  });
+
+  // --- wiring ----------------------------------------------------------------
+  let panelAt = 0;
+  resize();
+  if (!restore()) seed();
+  planes.forEach(p => { p.trail = []; p.last = null; if (p.mode === 'flight') routeLen(p); });
+  refreshPanels();
+  panelAt = 0;
+  store.beat = Date.now();
+  draw(0, speedMul(), 60);
+  start();
+  syncFleet();
+
+  host.addEventListener('resize', resize);
+  // capture:true - Streamlit scrolls a nested container, not the document.
+  hostDoc.addEventListener('scroll', () => { refreshPanels(); }, { capture: true, passive: true });
+  hostDoc.addEventListener('visibilitychange', () => {
+    persist();
+    if (!hostDoc.hidden) start();
+  });
+  host.setInterval(syncFleet, 1000);
+  // Heartbeat: if this frame's loop ever dies, restart it.
+  host.setInterval(() => {
+    if (store.token !== instance) return;
+    if (!raf && Date.now() - (store.beat || 0) > 1500) start();
+  }, 2000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[
+  {"id":"idle-roughness","fault_input":"rough running at idle","expected_document":"Lycoming O-320","expected_section":"Troubleshooting","out_of_scope":false},
+  {"id":"oil-temp-pressure","fault_input":"high oil temperature and low oil pressure","expected_document":"Lycoming O-320","expected_section":"Troubleshooting","out_of_scope":false},
+  {"id":"mag-drop","fault_input":"magneto drop exceeds limit during run-up","expected_document":"Cessna 172","expected_section":"Before Takeoff","out_of_scope":false},
+  {"id":"starter-no-engage","fault_input":"starter turns but engine does not engage","expected_document":"Cessna 172","expected_section":"Starting Engine","out_of_scope":false},
+  {"id":"alternator-low","fault_input":"low voltage indication after engine start","expected_document":"Cessna 172","expected_section":"Electrical System","out_of_scope":false},
+  {"id":"fuel-pressure","fault_input":"fluctuating fuel pressure indication","expected_document":"Lycoming O-320","expected_section":"Fuel System","out_of_scope":false},
+  {"id":"cylinder-temp","fault_input":"one cylinder has elevated temperature indication","expected_document":"Lycoming O-320","expected_section":"Troubleshooting","out_of_scope":false},
+  {"id":"carb-ice","fault_input":"power loss suspected from carburetor icing","expected_document":"Cessna 172","expected_section":"Amplified Emergency Procedures","out_of_scope":false},
+  {"id":"brake-spongy","fault_input":"soft brake pedal and reduced braking","expected_document":"AC 43.13-1B","expected_section":"Aircraft Hydraulic Systems","out_of_scope":false},
+  {"id":"control-friction","fault_input":"elevator control feels unusually stiff","expected_document":"AC 43.13-1B","expected_section":"Flight Controls","out_of_scope":false},
+  {"id":"oil-leak","fault_input":"fresh oil leak visible near the engine","expected_document":"Lycoming O-320","expected_section":"Maintenance","out_of_scope":false},
+  {"id":"prop-damage","fault_input":"minor propeller leading edge damage found during inspection","expected_document":"AC 43.13-1B","expected_section":"Propellers","out_of_scope":false},
+  {"id":"ad-compliance","fault_input":"check compliance with an applicable airworthiness directive","expected_document":"FAA AD","expected_section":"Compliance","out_of_scope":false},
+  {"id":"jet-engine","fault_input":"turbofan EGT exceeds redline on a Boeing 737","expected_document":"","expected_section":"","out_of_scope":true},
+  {"id":"rotorcraft","fault_input":"helicopter main rotor vibration at cruise","expected_document":"","expected_section":"","out_of_scope":true},
+  {"id":"medical","fault_input":"pilot reports chest pain during flight","expected_document":"","expected_section":"","out_of_scope":true},
+  {"id":"weather","fault_input":"select an IFR alternate based on tomorrow weather","expected_document":"","expected_section":"","out_of_scope":true}
+]
+

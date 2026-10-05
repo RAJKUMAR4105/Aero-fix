@@ -1,0 +1,10 @@
+SMOKE TEST ONLY - NOT APPROVED MAINTENANCE DATA
+
+ENGINE GROUND RUN CHECK
+
+1. Record the reported symptom and current engine indications before troubleshooting.
+
+WARNING: Do not perform maintenance or approve a return to service from this sample.
+
+2. Refer the technician to current approved aircraft and engine maintenance data.
+
